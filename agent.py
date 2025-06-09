@@ -155,7 +155,6 @@ def fetch_examples(state: MarketingState) -> MarketingState:
     queries = [
         "Indian telecom promotional SMS examples from Jio",
         "Jio marketing slogans 2024 site:jio.com",
-        "Examples of SMS marketing by Indian telecom companies",
         "Promotional recharge messages Jio",
         "Indian telecom advertisements"
     ]
