@@ -287,7 +287,9 @@ def run_graph(inputs: dict) -> dict:
     return graph.invoke(inputs)
 
 # Initialize MLflow tracking
+# MLflow autologging for LangChain/LangGraph
 mlflow.set_experiment("telecom_marketing_message_generation")
+mlflow.langchain.autolog()
 
 messages = []
 
@@ -306,7 +308,8 @@ for _, row in df.iterrows():
     }
     
     print(f"\n--- Processing Customer ID {row.customer_id} ---")
-    
+
+    # Just wrap the LangGraph execution in an MLflow run — autolog will handle everything else
     with mlflow.start_run(run_name=f"customer_{row.customer_id}"):
         # Log inputs
         mlflow.log_param("customer_id", int(row.customer_id))
