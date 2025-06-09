@@ -7,137 +7,141 @@ from sqlalchemy import create_engine
 from langchain_ollama import OllamaLLM
 from langgraph.graph import StateGraph
 from langchain_core.prompts import PromptTemplate
-from langchain_community.tools.ddg_search import DuckDuckGoSearchRun
 from typing import TypedDict
 import mysql.connector
-from langsmith import traceable, Client
+import mlflow
 
-# Load from .evnv, Setup environment
+import requests
+from bs4 import BeautifulSoup
+
+# Load environment variables from .env
 dotenv_path = ".env"
 load_dotenv(dotenv_path)
-os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
-os.environ["LANGSMITH_PROJECT"] = os.getenv("LANGSMITH_PROJECT")
-os.environ["LANGSMITH_TRACING"] = os.getenv("LANGSMITH_TRACING")
-os.environ["LANGSMITH_ENDPOINT"] = os.getenv("LANGSMITH_ENDPOINT")
-
-# Initialize LangSmith client
-client = Client()
-print(f"LangSmith Tracing Enabled for Project: {os.getenv('LANGSMITH_PROJECT')}")
 
 # Database read
 engine = create_engine("mysql+mysqlconnector://root:@localhost/telecom_data")
 df = pd.read_sql("SELECT customer_id, age, plan_type, data_usage_gb, churn_risk FROM customers", engine)
 print("\nAll Customer Data:\n", df)
 
-# Models
+# Initialize your models
 creative_llm = OllamaLLM(model="mistral", temperature=0.9, verbose=True)
 supervisor_llm = OllamaLLM(model="mistral", temperature=0.2, verbose=True)
-search_tool = DuckDuckGoSearchRun()
 
-# Prompts
+# Prompts (same as original)
 extract_prompt = PromptTemplate.from_template(
     """
-Below are some lines extracted from marketing-related web content:
+You are given lines extracted from telecom-related marketing webpages:
 
 {web_snippet_lines}
 
 Your task:
-- Extract only actual telecom marketing messages used in ads (max 20 words).
-- Ignore generic tips, explanations, or blog-style advice.
-- Return 3 to 5 short, punchy, real-world sounding telecom messages.
+Extract **only actual telecom marketing taglines** used in **ads or banners**. Discard:
 
-Output (just the lines):
+- General blog advice
+- Long descriptions
+- Tips or explanations
+
+Constraints:
+- Each message must be **one complete sentence**
+- **Max 20 words**
+- Focus on **telecom offers, benefits, or features**
+- Ignore any lines with vague content or without clear marketing intent
+
+Output (only the selected lines):
 """
 )
 
 generate_prompt = PromptTemplate.from_template(
     """
-Given the examples below, write ONE new persuasive short telecom marketing line for this customer.
+Given the examples below, generate ONE new telecom marketing tagline.
 
 Examples:
 {examples}
 
-Customer:
-Plan: {plan_type}
-Data Usage: {data_usage_gb} GB
-Churn Risk: {churn_risk}
+Customer Info:
+- Plan Type: {plan_type}
+- Data Usage: {data_usage_gb} GB
+- Churn Risk: {churn_risk}
 
-Instructions:
-- concise sentence (max 20 words).
-- Do not use data_usage, names, age or product explanations or any particular customer details directly.(don't use 9.2gb if the customer uses 9.2gb data) make the messages more generic.
+Guidelines:
+- Write **ONE concise sentence**, max **20 words**
+- Do **NOT** include specific numbers (e.g., 9.2GB, ₹199), personal details, or plan names
+- Focus on **generic persuasive appeal**, e.g., speed, savings, freedom, unlimited, convenience
 
-Output:
+Output (ONE line only):
 """
 )
 
 supervisor_plan_prompt = PromptTemplate.from_template(
     """
+You are reviewing this telecom marketing message for Indian users:
+
 Message:
 {line}
 
 Checklist:
-1. Is it under 20 words?
-2. Is it persuasive and clear?
-3. Is it suitable for Indian telecom users?
-4. IMPORTANTLY, Use your judgement to decide if it is a good message.
+1. Is the message under 20 words?
+2. Is it clear, persuasive, and benefit-focused?
+3. Is it culturally suitable for Indian telecom users?
+4. Is it generally a **good, usable message** (your judgement)?
 
-Decide what to do:
-- action: accept (if all good)
-- action: regenerate (if small tweak needed)
-- action: refetch (if message is bad or examples seem poor)
+Decide the next step:
+- action: **accept** (meets all criteria)
+- action: **regenerate** (minor flaws)
 
-Format strictly:
-action: <accept|regenerate|refetch>
-reason: <brief reason>
+Strict output format:
+action: <accept|regenerate>
+reason: <short reason why>
 """
 )
 
 validate_prompt = PromptTemplate.from_template(
     """
-Review this telecom marketing message for Indian users:
+Review the marketing message for Indian telecom users.
 
 Message:
 {line}
 
-Checklist:
-1. Under 20 words.
-2. Highlights one clear benefit (e.g., price, data, speed, recharge).
-3. Professional and persuasive tone.
-4. Suitable for Indian telecom context.
-5. Dont mention any telecom company names.
-6. No quote marks.
+Validation Criteria:
+1. Under 20 words
+2. Focuses on **one clear benefit** (price, data, speed, etc.)
+3. Persuasive and professional tone
+4. Culturally suitable for India
+5. **No brand names**
+6. **No quote marks**
 
 Instructions:
-- If all criteria are met, return the message as is.
-- Otherwise, rewrite as one professional, benefit-focused sentence (max 20 words), suitable for Indian users.
-- Never use quote marks.
+- If all criteria are satisfied, return the message as is.
+- Otherwise, rewrite as one **benefit-focused**, **professional sentence** (max 20 words).
+- Never include quote marks.
 
-Final output (one line only):
+Final output (only one valid line):
 """
 )
 
 evaluate_prompt = PromptTemplate.from_template(
     """
-Rate the quality of the telecom marketing message below for Indian users on a scale of 1 to 5, where 5 is excellent.
+Evaluate the quality of the following telecom marketing message for Indian users:
 
 Message:
 {line}
 
-Criteria:
-- Clarity and persuasiveness
-- Relevance to Indian telecom customers
-- Brevity and focus on benefits
-- IMPORTANTLY, use your judgement to decide if the LLM is working properly and hence give a score.
+Scoring Guide:
+- Score from 1 (poor) to 5 (excellent)
+- Consider:
+  - Clarity
+  - Persuasiveness
+  - Relevance to Indian telecom users
+  - Benefit-focus
+  - Is it something you'd use in a real campaign?
 
-Output format:
-score: <integer from 1 to 5>
+Output format only:
+score: <1–5>
 reason: <brief explanation>
-
-Only output the above two lines, nothing else.
 """
 )
 
-# State
+# State definition
 class MarketingState(TypedDict):
     plan_type: str
     age: int
@@ -150,26 +154,65 @@ class MarketingState(TypedDict):
     evaluation_score: int
     evaluation_reason: str
 
-# LangGraph Nodes
-def fetch_examples(state: MarketingState) -> MarketingState:
-    queries = [
-        "Indian telecom promotional SMS examples from Jio",
-        "Jio marketing slogans 2024 site:jio.com",
-        "Promotional recharge messages Jio",
-        "Indian telecom advertisements"
+# Scraper function (same)
+def scrape_jio_marketing():
+    url = "https://www.jio.com"  
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            print(f"Failed to fetch jio.com page, status code: {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"Exception during requests to jio.com: {e}")
+        return []
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    promo_texts = []
+
+    for tag in soup.find_all(['h1', 'h2', 'h3', 'p', 'span', 'li']):
+        text = tag.get_text(strip=True)
+        if len(text.split()) < 5 or len(text.split()) > 20:
+            continue
+        if re.search(r"(contact|login|signup|terms|privacy|download|more info)", text, re.I):
+            continue
+        if len(text) < 15:
+            continue
+        promo_texts.append(text)
+
+    # Deduplicate preserving order
+    seen = set()
+    unique_promos = []
+    for text in promo_texts:
+        if text not in seen:
+            seen.add(text)
+            unique_promos.append(text)
+
+    # Return top 10 promo texts
+    return unique_promos[:10]
+
+# Scrape once
+scraped_lines = scrape_jio_marketing()
+if not scraped_lines:
+    print("No marketing examples scraped, falling back to default generic examples.")
+    scraped_lines = [
+        "Unlimited calls and data at the best prices.",
+        "Stay connected with fast 4G speed.",
+        "Affordable prepaid plans tailored for you.",
+        "Enjoy seamless streaming without buffering.",
+        "Recharge now and get extra benefits."
     ]
-    query = random.choice(queries)
-    print(f"\nSelected Query: {query}\n")
-    raw_results = search_tool.run(query)
-    print(f"\nRaw DuckDuckGo results:\n{raw_results[:1000]}...\n")
 
-    # Send full raw text to the LLM and extracts examples
-    prompt = extract_prompt.format(web_snippet_lines=raw_results)
-    refined_examples = supervisor_llm.invoke(prompt)
+raw_text = "\n".join(scraped_lines)
+prompt = extract_prompt.format(web_snippet_lines=raw_text)
+example_messages = supervisor_llm.invoke(prompt).strip()
 
-    print(f"\nFinal extracted examples:\n{refined_examples.strip()}\n")
-    return {**state, "examples": refined_examples.strip()}
+print(f"\nFinal Extracted Example Messages (used for all users):\n{example_messages}\n")
 
+# Define the LangGraph nodes (same logic as before)
 
 def generate_message(state: MarketingState) -> MarketingState:
     prompt = generate_prompt.format(**state)
@@ -181,8 +224,8 @@ def supervisor_check(state: MarketingState) -> MarketingState:
     prompt = supervisor_plan_prompt.format(line=state["candidate"])
     decision = supervisor_llm.invoke(prompt)
     print(f"Supervisor LLM decision:\n{decision}\n")
-    match = re.search(r"action:\s*(accept|regenerate|refetch)", decision.lower())
-    action = match.group(1) if match else "accept" 
+    match = re.search(r"action:\s*(accept|regenerate)", decision.lower())
+    action = match.group(1) if match else "accept"
     return {**state, "decision": action}
 
 def validate_message(state: MarketingState) -> MarketingState:
@@ -198,25 +241,21 @@ def evaluate_message(state: MarketingState) -> MarketingState:
     match = re.search(r"score:\s*([1-5])", evaluation)
     score = int(match.group(1)) if match else 0
     print(f"Evaluation score: {score} → ", end="")
-    if score < 2:
-        print("Going to refetch.")
-    elif score < 4:
+    if score < 4:
         print("Going to regenerate.")
     else:
         print("Accepted and finished.")
     return {**state, "evaluation_score": score, "evaluation_reason": evaluation.strip()}
 
-
-# LangGraph Workflow
+# Build the workflow graph
 workflow = StateGraph(state_schema=MarketingState)
-workflow.add_node("fetch_examples", fetch_examples)
+
 workflow.add_node("generate", generate_message)
 workflow.add_node("supervisor_check", supervisor_check)
 workflow.add_node("validate", validate_message)
 workflow.add_node("evaluate", evaluate_message)
 
-workflow.set_entry_point("fetch_examples")
-workflow.add_edge("fetch_examples", "generate")
+workflow.set_entry_point("generate")
 workflow.add_edge("generate", "supervisor_check")
 
 workflow.add_conditional_edges(
@@ -225,55 +264,72 @@ workflow.add_conditional_edges(
     {
         "accept": "validate",
         "regenerate": "generate",
-        "refetch": "fetch_examples"
     }
 )
 
 workflow.add_edge("validate", "evaluate")
-# workflow.set_finish_point("evaluate")
 
-# Add conditional routing after evaluation
 workflow.add_conditional_edges(
     "evaluate",
     lambda state: (
-        "refetch" if state["evaluation_score"] < 2
-        else "regenerate" if state["evaluation_score"] < 4
-        else "finish"
+        "generate" if state["evaluation_score"] < 4 else "finish"
     ),
     {
-        "refetch": "fetch_examples",
-        "regenerate": "generate",
-        "finish": "__end__"  
+        "generate": "generate",
+        "finish": "__end__"
     }
 )
 
 graph = workflow.compile()
 
-@traceable(name="generate_telecom_message")
+# Define the run_graph function 
 def run_graph(inputs: dict) -> dict:
     return graph.invoke(inputs)
 
-# Main processing loop
+# Initialize MLflow tracking
+mlflow.set_experiment("telecom_marketing_message_generation")
+
 messages = []
+
 for _, row in df.iterrows():
     inputs = {
         "plan_type": row.plan_type,
         "age": int(row.age),
         "data_usage_gb": float(row.data_usage_gb),
         "churn_risk": row.churn_risk,
-        "examples": "",
+        "examples": example_messages,
         "candidate": "",
         "decision": "",
         "final_message": "",
         "evaluation_score": 0,
         "evaluation_reason": "",
     }
+    
     print(f"\n--- Processing Customer ID {row.customer_id} ---")
-    result = run_graph(inputs)
-    print(f"Final message: {result['final_message']} | Score: {result['evaluation_score']}")
-    messages.append((result["final_message"], int(row.customer_id)))
+    
+    with mlflow.start_run(run_name=f"customer_{row.customer_id}"):
+        # Log inputs
+        mlflow.log_param("customer_id", int(row.customer_id))
+        mlflow.log_param("plan_type", inputs["plan_type"])
+        mlflow.log_param("age", inputs["age"])
+        mlflow.log_param("data_usage_gb", inputs["data_usage_gb"])
+        mlflow.log_param("churn_risk", inputs["churn_risk"])
+        mlflow.log_param("examples", inputs["examples"]) 
 
-# Update DB with final marketing messages
+        
+        # Run the LangGraph workflow
+        result = run_graph(inputs)
+        
+        # Log outputs
+        mlflow.log_param("final_message", result["final_message"])
+        mlflow.log_param("evaluation_reason", result["evaluation_reason"])
+        mlflow.log_metric("evaluation_score", result["evaluation_score"])
+        
+        print(f"Final message: {result['final_message']} | Score: {result['evaluation_score']}")
+        
+        messages.append((result["final_message"], int(row.customer_id)))
+
+# Update DB with generated messages
 conn = mysql.connector.connect(host="localhost", user="root", password="", database="telecom_data")
 cursor = conn.cursor()
 cursor.executemany("UPDATE customers SET marketing_message=%s WHERE customer_id=%s", messages)
@@ -281,4 +337,4 @@ conn.commit()
 cursor.close()
 conn.close()
 
-print("LangGraph pipeline completed. Messages saved.")
+print("MLflow-tracked LangGraph pipeline completed. Messages saved.")
