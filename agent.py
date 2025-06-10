@@ -293,6 +293,10 @@ mlflow.langchain.autolog()
 
 messages = []
 
+# Build graph only once
+graph = workflow.compile()
+
+# Run for each customer with individual MLflow runs
 for _, row in df.iterrows():
     inputs = {
         "plan_type": row.plan_type,
@@ -306,45 +310,44 @@ for _, row in df.iterrows():
         "evaluation_score": 0,
         "evaluation_reason": "",
     }
-    
+
     print(f"\n--- Processing Customer ID {row.customer_id} ---")
 
-    # Prepare the actual prompts used for this customer
+    # Generate prompts to log
     generate_prompt_filled = generate_prompt.format(**inputs)
-    # candidate will be filled after generation, so use empty or update after generation
     supervisor_prompt_filled = supervisor_plan_prompt.format(line=inputs["candidate"])
     validate_prompt_filled = validate_prompt.format(line=inputs["candidate"])
     evaluate_prompt_filled = evaluate_prompt.format(line=inputs["final_message"])
 
     with mlflow.start_run(run_name=f"customer_{row.customer_id}"):
-        # Log inputs
         mlflow.log_param("customer_id", int(row.customer_id))
         mlflow.log_param("plan_type", inputs["plan_type"])
         mlflow.log_param("age", inputs["age"])
         mlflow.log_param("data_usage_gb", inputs["data_usage_gb"])
         mlflow.log_param("churn_risk", inputs["churn_risk"])
-        mlflow.log_param("examples", inputs["examples"]) 
+        mlflow.log_param("examples", inputs["examples"])
 
-        # Log the filled prompts as a text artifact
+        # Save prompt versions
         with open("prompts_used.txt", "w", encoding="utf-8") as f:
             f.write("Generate Prompt:\n" + generate_prompt_filled + "\n\n")
             f.write("Supervisor Prompt:\n" + supervisor_prompt_filled + "\n\n")
             f.write("Validate Prompt:\n" + validate_prompt_filled + "\n\n")
             f.write("Evaluate Prompt:\n" + evaluate_prompt_filled + "\n")
         mlflow.log_artifact("prompts_used.txt")
-        os.remove("prompts_used.txt")  # Clean up
+        os.remove("prompts_used.txt")
 
-        # Run the LangGraph workflow
-        result = run_graph(inputs)
-        
-        # Log outputs
+        # Run the graph once
+        result = graph.invoke(inputs)
+
+        # Log output
         mlflow.log_param("final_message", result["final_message"])
         mlflow.log_param("evaluation_reason", result["evaluation_reason"])
         mlflow.log_metric("evaluation_score", result["evaluation_score"])
-        
+
         print(f"Final message: {result['final_message']} | Score: {result['evaluation_score']}")
-        
+
         messages.append((result["final_message"], int(row.customer_id)))
+
 
 # Update DB with generated messages
 conn = mysql.connector.connect(host="localhost", user="root", password="", database="telecom_data")
