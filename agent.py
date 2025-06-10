@@ -309,7 +309,13 @@ for _, row in df.iterrows():
     
     print(f"\n--- Processing Customer ID {row.customer_id} ---")
 
-    # Just wrap the LangGraph execution in an MLflow run — autolog will handle everything else
+    # Prepare the actual prompts used for this customer
+    generate_prompt_filled = generate_prompt.format(**inputs)
+    # candidate will be filled after generation, so use empty or update after generation
+    supervisor_prompt_filled = supervisor_plan_prompt.format(line=inputs["candidate"])
+    validate_prompt_filled = validate_prompt.format(line=inputs["candidate"])
+    evaluate_prompt_filled = evaluate_prompt.format(line=inputs["final_message"])
+
     with mlflow.start_run(run_name=f"customer_{row.customer_id}"):
         # Log inputs
         mlflow.log_param("customer_id", int(row.customer_id))
@@ -319,7 +325,15 @@ for _, row in df.iterrows():
         mlflow.log_param("churn_risk", inputs["churn_risk"])
         mlflow.log_param("examples", inputs["examples"]) 
 
-        
+        # Log the filled prompts as a text artifact
+        with open("prompts_used.txt", "w", encoding="utf-8") as f:
+            f.write("Generate Prompt:\n" + generate_prompt_filled + "\n\n")
+            f.write("Supervisor Prompt:\n" + supervisor_prompt_filled + "\n\n")
+            f.write("Validate Prompt:\n" + validate_prompt_filled + "\n\n")
+            f.write("Evaluate Prompt:\n" + evaluate_prompt_filled + "\n")
+        mlflow.log_artifact("prompts_used.txt")
+        os.remove("prompts_used.txt")  # Clean up
+
         # Run the LangGraph workflow
         result = run_graph(inputs)
         
