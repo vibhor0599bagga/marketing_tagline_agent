@@ -293,9 +293,6 @@ mlflow.langchain.autolog()
 
 messages = []
 
-# Build graph only once
-graph = workflow.compile()
-
 # Run for each customer with individual MLflow runs
 for _, row in df.iterrows():
     inputs = {
