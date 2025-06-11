@@ -14,6 +14,8 @@ import tempfile
 import requests
 from bs4 import BeautifulSoup
 from difflib import SequenceMatcher
+from mlflow.metrics import make_metric
+from sentence_transformers import SentenceTransformer, util
 
 # Load environment variables from .env
 dotenv_path = ".env"
@@ -358,7 +360,13 @@ conn.close()
 
 print("************** MLflow-tracked LangGraph pipeline completed. Messages saved ***************")
 
-# Example eval data: customer features as input, ideal message as ground truth
+
+from mlflow.metrics import make_metric
+from sentence_transformers import SentenceTransformer, util
+from difflib import SequenceMatcher
+
+
+# Dummy eval data
 eval_data = pd.DataFrame({
     "inputs": [
         {"plan_type": "prepaid", "age": 22, "data_usage_gb": 3, "churn_risk": "low"},
@@ -370,8 +378,11 @@ eval_data = pd.DataFrame({
     ],
 })
 
-# Wrapper for your pipeline
-def eval_langgraph_predict(inputs: pd.DataFrame) -> List[str]:
+# Sentence transformer model (not used now, just kept for reference)
+st_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Your LangGraph pipeline (replace with actual logic)
+def eval_langgraph_predict(inputs: pd.DataFrame) -> pd.Series:
     preds = []
     for features in inputs["inputs"]:
         state = {
@@ -379,31 +390,56 @@ def eval_langgraph_predict(inputs: pd.DataFrame) -> List[str]:
             "age": features["age"],
             "data_usage_gb": features["data_usage_gb"],
             "churn_risk": features["churn_risk"],
-            "examples": example_messages,
+            "examples": example_messages,  # Make sure this is defined
             "candidate": "",
             "decision": "",
             "final_message": "",
             "evaluation_score": 0,
             "evaluation_reason": "",
         }
-        result = graph.invoke(state)
+        result = graph.invoke(state)  # Replace with your actual LangGraph pipeline
         preds.append(result["final_message"])
-    return preds
+    return pd.Series(preds)
 
-# Custom correctness metric using string similarity
+# Commented out semantic similarity metric for now
+# semantic_sim = make_metric(
+#     name="semantic_similarity",
+#     greater_is_better=True,
+#     eval_fn=lambda preds, targets, metrics, **kwargs: util.cos_sim(
+#         st_model.encode(preds.tolist(), convert_to_tensor=True),
+#         st_model.encode(targets.tolist(), convert_to_tensor=True)
+#     ).diagonal().tolist()
+# )
+
+# Custom string-based correctness
 def simple_correctness(pred: str, truth: str) -> float:
     """Returns a similarity score between 0 and 1."""
     return SequenceMatcher(None, pred.lower(), truth.lower()).ratio()
 
-# Run evaluation and log custom correctness to MLflow
-with mlflow.start_run(run_name="pipeline_eval", nested=True):
+# Run evaluation (only string-based correctness)
+with mlflow.start_run(run_name="string_match_eval", nested=True):
+    mlflow.set_tag("eval_type", "simple_correctness_only")
+
+    # # Run evaluation
+    # eval_result = mlflow.evaluate(
+    #     model=eval_langgraph_predict,
+    #     data=eval_data,
+    #     targets="ground_truth",
+    #     model_type="custom",
+    #     extra_metrics=[semantic_sim],
+    #     evaluators=["default"],
+    # )
+
+    # Run prediction
     predictions = eval_langgraph_predict(eval_data)
+
+    # Evaluate string similarity
     correctness_scores = [
         simple_correctness(pred, truth)
         for pred, truth in zip(predictions, eval_data["ground_truth"])
     ]
     avg_correctness = sum(correctness_scores) / len(correctness_scores)
     mlflow.log_metric("avg_custom_correctness", avg_correctness)
+
     print("Custom correctness scores:", correctness_scores)
     print("Average custom correctness:", avg_correctness)
-
