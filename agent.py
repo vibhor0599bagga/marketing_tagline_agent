@@ -378,10 +378,10 @@ eval_data = pd.DataFrame({
     ],
 })
 
-# Sentence transformer model (not used now, just kept for reference)
-st_model = SentenceTransformer("all-MiniLM-L6-v2")
+# # Sentence transformer model (not used now, just kept for reference)
+# st_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Your LangGraph pipeline (replace with actual logic)
+
 def eval_langgraph_predict(inputs: pd.DataFrame) -> pd.Series:
     preds = []
     for features in inputs["inputs"]:
@@ -390,14 +390,14 @@ def eval_langgraph_predict(inputs: pd.DataFrame) -> pd.Series:
             "age": features["age"],
             "data_usage_gb": features["data_usage_gb"],
             "churn_risk": features["churn_risk"],
-            "examples": example_messages,  # Make sure this is defined
+            "examples": example_messages,
             "candidate": "",
             "decision": "",
             "final_message": "",
             "evaluation_score": 0,
             "evaluation_reason": "",
         }
-        result = graph.invoke(state)  # Replace with your actual LangGraph pipeline
+        result = graph.invoke(state) 
         preds.append(result["final_message"])
     return pd.Series(preds)
 
