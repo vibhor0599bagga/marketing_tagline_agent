@@ -7,12 +7,13 @@ from sqlalchemy import create_engine
 from langchain_ollama import OllamaLLM
 from langgraph.graph import StateGraph
 from langchain_core.prompts import PromptTemplate
-from typing import TypedDict
+from typing import TypedDict, List
 import mysql.connector
 import mlflow
-
+import tempfile
 import requests
 from bs4 import BeautifulSoup
+from difflib import SequenceMatcher
 
 # Load environment variables from .env
 dotenv_path = ".env"
@@ -287,7 +288,6 @@ def run_graph(inputs: dict) -> dict:
     return graph.invoke(inputs)
 
 # Initialize MLflow tracking
-# MLflow autologging for LangChain/LangGraph
 mlflow.set_experiment("telecom_marketing_message_generation")
 mlflow.langchain.autolog()
 
@@ -324,14 +324,16 @@ for _, row in df.iterrows():
         mlflow.log_param("churn_risk", inputs["churn_risk"])
         mlflow.log_param("examples", inputs["examples"])
 
-        # Save prompt versions
-        with open("prompts_used.txt", "w", encoding="utf-8") as f:
-            f.write("Generate Prompt:\n" + generate_prompt_filled + "\n\n")
-            f.write("Supervisor Prompt:\n" + supervisor_prompt_filled + "\n\n")
-            f.write("Validate Prompt:\n" + validate_prompt_filled + "\n\n")
-            f.write("Evaluate Prompt:\n" + evaluate_prompt_filled + "\n")
-        mlflow.log_artifact("prompts_used.txt")
-        os.remove("prompts_used.txt")
+        with tempfile.NamedTemporaryFile("w+", suffix=".txt", delete=False, encoding="utf-8") as temp_file:
+            temp_file.write("Generate Prompt:\n" + generate_prompt_filled + "\n\n")
+            temp_file.write("Supervisor Prompt:\n" + supervisor_prompt_filled + "\n\n")
+            temp_file.write("Validate Prompt:\n" + validate_prompt_filled + "\n\n")
+            temp_file.write("Evaluate Prompt:\n" + evaluate_prompt_filled + "\n")
+            temp_file.flush() 
+
+            mlflow.log_artifact(temp_file.name, artifact_path="prompts")
+
+        os.remove(temp_file.name)
 
         # Run the graph once
         result = graph.invoke(inputs)
@@ -354,4 +356,54 @@ conn.commit()
 cursor.close()
 conn.close()
 
-print("MLflow-tracked LangGraph pipeline completed. Messages saved.")
+print("************** MLflow-tracked LangGraph pipeline completed. Messages saved ***************")
+
+# Example eval data: customer features as input, ideal message as ground truth
+eval_data = pd.DataFrame({
+    "inputs": [
+        {"plan_type": "prepaid", "age": 22, "data_usage_gb": 3, "churn_risk": "low"},
+        {"plan_type": "postpaid", "age": 45, "data_usage_gb": 15, "churn_risk": "high"},
+    ],
+    "ground_truth": [
+        "Stay connected with affordable prepaid plans and fast data.",
+        "Enjoy premium postpaid benefits and seamless high-speed data.",
+    ],
+})
+
+# Wrapper for your pipeline
+def eval_langgraph_predict(inputs: pd.DataFrame) -> List[str]:
+    preds = []
+    for features in inputs["inputs"]:
+        state = {
+            "plan_type": features["plan_type"],
+            "age": features["age"],
+            "data_usage_gb": features["data_usage_gb"],
+            "churn_risk": features["churn_risk"],
+            "examples": example_messages,
+            "candidate": "",
+            "decision": "",
+            "final_message": "",
+            "evaluation_score": 0,
+            "evaluation_reason": "",
+        }
+        result = graph.invoke(state)
+        preds.append(result["final_message"])
+    return preds
+
+# Custom correctness metric using string similarity
+def simple_correctness(pred: str, truth: str) -> float:
+    """Returns a similarity score between 0 and 1."""
+    return SequenceMatcher(None, pred.lower(), truth.lower()).ratio()
+
+# Run evaluation and log custom correctness to MLflow
+with mlflow.start_run(run_name="pipeline_eval", nested=True):
+    predictions = eval_langgraph_predict(eval_data)
+    correctness_scores = [
+        simple_correctness(pred, truth)
+        for pred, truth in zip(predictions, eval_data["ground_truth"])
+    ]
+    avg_correctness = sum(correctness_scores) / len(correctness_scores)
+    mlflow.log_metric("avg_custom_correctness", avg_correctness)
+    print("Custom correctness scores:", correctness_scores)
+    print("Average custom correctness:", avg_correctness)
+
